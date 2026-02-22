@@ -1,0 +1,7 @@
+; Copy to platformio_override.ini (or merge into platformio.ini) to set WiFi
+; without editing include/config.h. Replace with your SSID and password.
+
+[env:ttgo-lora32-v21]
+build_flags =
+  -DWIFI_SSID=\"YourWiFiSSID\"
+  -DWIFI_PASSWORD=\"YourWiFiPassword\"

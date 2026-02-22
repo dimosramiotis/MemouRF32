@@ -7,12 +7,12 @@ Custom firmware for **TTGO LoRa32 v2.1** (ESP32 + SX1276 @ 433 MHz). Lets you **
 - **Web UI** (when connected to WiFi): login, clone RF, save as button, list/trigger/delete buttons
 - **Clone**: capture raw OOK pulses from your remote; save as a new button
 - **Saved buttons**: stored in LittleFS; trigger from web or from HomeKit
-- **HomeKit**: device appears as a bridge with up to 8 programmable switches (one per saved button slot). Add the accessory in the **Home** app; then use **Home Assistant → HomeKit** integration to discover it
+- **HomeKit**: device appears as a bridge with up to 24 programmable switches (one per saved button slot). Add the accessory in the **Home** app; then use **Home Assistant → HomeKit** integration to discover it
 
 ## Hardware
 
 - Board: **TTGO LoRa32 v2.1** (e.g. `ttgo-lora32-v21` in PlatformIO)
-
+- Pins (aligned with your ESPHome YAML): SPI 5/27/19, SX127x CS=18, RST=23, RF data=GPIO32
 
 ## Build & flash
 
@@ -21,7 +21,7 @@ Custom firmware for **TTGO LoRa32 v2.1** (ESP32 + SX1276 @ 433 MHz). Lets you **
    pio run
    pio run -t upload
    ```
-   Or use the PlatformIO IDE: open the project and use **Build** / **Upload**.
+   Or use the PlatformIO IDE (VSCode/Cursor): open the project and use **Build** / **Upload**.
 
 2. **Serial monitor** (optional):
    ```bash
