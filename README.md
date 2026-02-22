@@ -9,6 +9,12 @@ Custom firmware for **TTGO LoRa32 v2.1** (ESP32 + SX1276 @ 433 MHz). Lets you **
 - **Saved buttons**: stored in LittleFS; trigger from web or from HomeKit
 - **HomeKit**: device appears as a bridge with up to 24 programmable switches (one per saved button slot). Add the accessory in the **Home** app; then use **Home Assistant → HomeKit** integration to discover it
 
+## Screenshots
+
+| Web UI | Clone RF / Saved buttons |
+|--------|---------------------------|
+| ![Web UI](images/screen1.png) | ![Clone RF / Saved buttons](images/screen2.png) |
+
 ## Hardware
 
 - Board: **TTGO LoRa32 v2.1** (e.g. `ttgo-lora32-v21` in PlatformIO)
@@ -51,7 +57,7 @@ Custom firmware for **TTGO LoRa32 v2.1** (ESP32 + SX1276 @ 433 MHz). Lets you **
 
 7. **HomeKit**
    - In the **Home** app (iOS): Add Accessory → **MemouRF32** (or “RF Button” entries).
-   - Pair with the code shown in Serial / HomeSpan.
+   - Pairing code: **120-81-208** (also shown in Serial / HomeSpan).
    - In **Home Assistant**: add the **HomeKit** integration and discover the bridge; the switches map to your saved buttons by index (first saved button = first switch, etc.).
 
 ## Configuration
