@@ -12,6 +12,7 @@
 #define AP_SSID            "MemouRF32"
 #define AP_PASSWORD       "memourf32"   // min 8 chars for WPA2
 #define WIFI_CONNECT_TIMEOUT_MS  15000   // try STA this long before falling back to AP
+#define WIFI_RECONNECT_INTERVAL_MS 30000 // retry WiFi every 30s when disconnected
 
 // ---------- Web server ----------
 #define WEB_SERVER_PORT    80

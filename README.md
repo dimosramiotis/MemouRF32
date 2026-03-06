@@ -37,7 +37,7 @@ Custom firmware for **TTGO LoRa32 v2.1** (ESP32 + SX1276 @ 433 MHz). Lets you **
 ## First use
 
 1. **Power the board.** It starts as a **hotspot** by default (no WiFi configured yet):
-   - SSID: **MemouRF32**
+   - SSID: **MemouRF32-XXXX** (where XXXX is derived from the board's MAC address, unique per device)
    - Password: **memourf32**
 2. **Connect your phone/PC** to the hotspot, then open a browser and go to **http://192.168.4.1** (or any address — captive portal will redirect you).
 3. **Enter your home WiFi** name (SSID) and password, then tap **Save and connect**. The device reboots and connects to your WiFi.
@@ -64,14 +64,23 @@ Custom firmware for **TTGO LoRa32 v2.1** (ESP32 + SX1276 @ 433 MHz). Lets you **
 
 | Item | Where | Default |
 |------|--------|--------|
-| Hotspot (AP) | `config.h` | `AP_SSID` "MemouRF32", `AP_PASSWORD` "memourf32" |
+| Hotspot (AP) | `config.h` | `AP_PASSWORD` "memourf32" (SSID is auto-generated: MemouRF32-XXXX) |
 | WiFi credentials | Set via hotspot config page; stored in NVS | — |
 | STA connect timeout | `config.h` | `WIFI_CONNECT_TIMEOUT_MS` (15 s) |
+| WiFi reconnect interval | `config.h` | `WIFI_RECONNECT_INTERVAL_MS` (30 s) |
 | Web login | `config.h` | `WEB_USER`, `WEB_PASS` |
 | Max saved buttons | `config.h` | `MAX_SAVED_BUTTONS` (24) |
 | Clone timeout | `config.h` | `CLONE_CAPTURE_MS` (10 s) |
 
 To **reconfigure WiFi** after setup: open **http://\<device-ip\>/wifi**, enter new SSID/password, and save (device reboots and connects to the new network).
+
+### Unique device identity
+
+Each board gets a unique name based on its MAC address (e.g. **MemouRF32-A3F1**). This name is used for the hotspot SSID, hostname, and HomeKit bridge identity, so multiple devices can coexist on the same network without conflicts.
+
+### WiFi auto-reconnect
+
+If the router is not available when the board boots (e.g. after a power cut), the device starts a temporary hotspot **and** keeps retrying WiFi in the background every 30 seconds. Once the router comes back up the device automatically connects, shuts down the hotspot, and starts the HomeKit bridge — no manual power-cycle needed.
 
 ## Project layout
 

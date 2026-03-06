@@ -21,6 +21,25 @@ static bool s_isAPMode = false;   // true = we are in hotspot, show WiFi config
 static unsigned long s_cloneStartMs = 0;
 static const unsigned long CLONE_TIMEOUT_MS = (unsigned long)CLONE_CAPTURE_MS;
 
+// ---------- Device identity (unique per ESP32, derived from MAC) ----------
+static String s_deviceId;     // last 4 hex chars of MAC, e.g. "A3F1"
+static String s_deviceName;   // e.g. "MemouRF32-A3F1"
+
+static void buildDeviceId() {
+  uint64_t efuse = ESP.getEfuseMac();
+  uint8_t* mac = (uint8_t*)&efuse;
+  char suffix[5];
+  snprintf(suffix, sizeof(suffix), "%02X%02X", mac[4], mac[5]);
+  s_deviceId = String(suffix);
+  s_deviceName = String("MemouRF32-") + s_deviceId;
+}
+
+// ---------- WiFi reconnect state ----------
+static bool s_homeSpanReady = false;
+static bool s_hasSavedCreds = false;
+static String s_savedSsid, s_savedPass;
+static unsigned long s_lastReconnectAttempt = 0;
+
 // ---------- WiFi credentials in NVS ----------
 static const char* WIFI_PREFS_NS = "wifi";
 static bool wifiConfigLoad(String& ssid, String& password) {
@@ -423,26 +442,27 @@ struct RFSwitchService : Service::Switch {
 static RFSwitchService* g_rfButtons[MAX_SAVED_BUTTONS] = {};
 
 void setupHomeSpan() {
-  String ssid, pass;
-  if (wifiConfigLoad(ssid, pass))
-    homeSpan.setWifiCredentials(ssid.c_str(), pass.c_str());
+  homeSpan.setWifiCredentials(s_savedSsid.c_str(), s_savedPass.c_str());
 
   homeSpan.setLogLevel(0);
   homeSpan.setPairingCode("12081208");
   homeSpan.setPortNum(1201);
-  homeSpan.begin(Category::Bridges, "MemouRF32", "MemouRF32", "MemouRF32 1.0");
+  homeSpan.begin(Category::Bridges, s_deviceName.c_str(), s_deviceName.c_str(), "MemouRF32 1.0");
+
+  char bridgeSerial[20];
+  snprintf(bridgeSerial, sizeof(bridgeSerial), "MRF32-%s", s_deviceId.c_str());
 
   new SpanAccessory();
   new Service::AccessoryInformation();
-  new Characteristic::Name("MemouRF32 Bridge");
+  new Characteristic::Name(s_deviceName.c_str());
   new Characteristic::Manufacturer("MemouRF32");
-  new Characteristic::SerialNumber("MRF32-0001");
+  new Characteristic::SerialNumber(bridgeSerial);
   new Characteristic::Model("RF Bridge");
   new Characteristic::FirmwareRevision("1.0");
   new Characteristic::Identify();
 
   std::vector<SavedButton> btns = storageLoadButtons();
-  char serial[16];
+  char serial[20];
   char nameBuf[64];
 
   for (int i = 0; i < MAX_SAVED_BUTTONS; i++) {
@@ -454,7 +474,7 @@ void setupHomeSpan() {
       snprintf(nameBuf, sizeof(nameBuf), "RF Slot %d", i + 1);
     }
     new Characteristic::Name(nameBuf);
-    snprintf(serial, sizeof(serial), "MRF32-%04d", i + 1);
+    snprintf(serial, sizeof(serial), "MRF32-%s-%02d", s_deviceId.c_str(), i + 1);
     new Characteristic::SerialNumber(serial);
     new Characteristic::Manufacturer("MemouRF32");
     new Characteristic::Model("RF Switch");
@@ -468,17 +488,22 @@ void setupHomeSpan() {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("MemouRF32 starting");
+
+  buildDeviceId();
+  Serial.print("MemouRF32 starting [");
+  Serial.print(s_deviceName);
+  Serial.println("]");
 
   if (!storageBegin()) Serial.println("Storage init failed");
   if (!rfBegin()) Serial.println("RF init failed (check SX127x)");
 
-  String savedSsid, savedPass;
-  bool hasCreds = wifiConfigLoad(savedSsid, savedPass);
+  s_hasSavedCreds = wifiConfigLoad(s_savedSsid, s_savedPass) && s_savedSsid.length() > 0;
 
-  if (hasCreds && savedSsid.length() > 0) {
+  if (s_hasSavedCreds) {
     WiFi.mode(WIFI_STA);
-    WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+    WiFi.setHostname(s_deviceName.c_str());
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(s_savedSsid.c_str(), s_savedPass.c_str());
     unsigned long deadline = millis() + (unsigned long)WIFI_CONNECT_TIMEOUT_MS;
     while (WiFi.status() != WL_CONNECTED && millis() < deadline) {
       delay(300);
@@ -490,19 +515,30 @@ void setup() {
       Serial.println(WiFi.localIP());
       s_isAPMode = false;
     } else {
-      Serial.println(" STA timeout, starting AP");
-      hasCreds = false;
+      Serial.println(" STA timeout, starting AP+STA for background retry");
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.setHostname(s_deviceName.c_str());
+      WiFi.setAutoReconnect(true);
+      WiFi.softAP(s_deviceName.c_str(), AP_PASSWORD, 1, 0, 4);
+      s_isAPMode = true;
+      delay(100);
+      dnsServer.start(53, "*", WiFi.softAPIP());
+      Serial.print("Hotspot: ");
+      Serial.print(s_deviceName);
+      Serial.print(" IP ");
+      Serial.println(WiFi.softAPIP());
+      WiFi.begin(s_savedSsid.c_str(), s_savedPass.c_str());
+      s_lastReconnectAttempt = millis();
     }
-  }
-  if (!hasCreds || WiFi.status() != WL_CONNECTED) {
+  } else {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_AP);
-    WiFi.softAP(AP_SSID, AP_PASSWORD, 1, 0, 4);
+    WiFi.softAP(s_deviceName.c_str(), AP_PASSWORD, 1, 0, 4);
     s_isAPMode = true;
     delay(100);
     dnsServer.start(53, "*", WiFi.softAPIP());
     Serial.print("Hotspot: ");
-    Serial.print(AP_SSID);
+    Serial.print(s_deviceName);
     Serial.print(" IP ");
     Serial.println(WiFi.softAPIP());
   }
@@ -559,15 +595,46 @@ void setup() {
 
   if (!s_isAPMode) {
     setupHomeSpan();
+    s_homeSpanReady = true;
     Serial.println("HomeKit bridge ready. Add accessory in Home app.");
+  } else if (s_hasSavedCreds) {
+    Serial.println("AP+STA mode: WiFi will keep retrying in background.");
   } else {
-    Serial.println("AP mode: HomeKit disabled until WiFi is configured.");
+    Serial.println("AP mode: configure WiFi to enable HomeKit.");
   }
 }
 
 void loop() {
-  if (!s_isAPMode) homeSpan.poll();
+  if (s_homeSpanReady) homeSpan.poll();
   if (s_isAPMode) dnsServer.processNextRequest();
+
+  // Periodic WiFi retry when we have credentials but router isn't up yet
+  if (s_hasSavedCreds && WiFi.status() != WL_CONNECTED) {
+    unsigned long now = millis();
+    if (now - s_lastReconnectAttempt >= WIFI_RECONNECT_INTERVAL_MS) {
+      Serial.println("WiFi reconnect attempt...");
+      WiFi.begin(s_savedSsid.c_str(), s_savedPass.c_str());
+      s_lastReconnectAttempt = now;
+    }
+  }
+
+  // WiFi just came up after booting without it — shut down AP, start HomeKit
+  if (s_hasSavedCreds && WiFi.status() == WL_CONNECTED && !s_homeSpanReady) {
+    Serial.print("WiFi connected: ");
+    Serial.println(WiFi.localIP());
+    if (s_isAPMode) {
+      dnsServer.stop();
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_STA);
+      WiFi.setHostname(s_deviceName.c_str());
+      WiFi.setAutoReconnect(true);
+      s_isAPMode = false;
+    }
+    setupHomeSpan();
+    s_homeSpanReady = true;
+    Serial.println("HomeKit bridge ready.");
+  }
+
   if (rfCaptureRunning()) {
     if ((millis() - s_cloneStartMs >= CLONE_TIMEOUT_MS) || rfCaptureShouldAutoStop())
       rfCaptureStop();
