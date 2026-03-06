@@ -82,13 +82,86 @@ Each board gets a unique name based on its MAC address (e.g. **MemouRF32-A3F1**)
 
 If the router is not available when the board boots (e.g. after a power cut), the device starts a temporary hotspot **and** keeps retrying WiFi in the background every 30 seconds. Once the router comes back up the device automatically connects, shuts down the hotspot, and starts the HomeKit bridge — no manual power-cycle needed.
 
+## LoRa Gateway Mode (v2.0)
+
+> **Full setup guide with wiring, API examples, and troubleshooting: [GATEWAY_SETUP.md](GATEWAY_SETUP.md)**
+
+MemouRF32 now supports three roles, selectable during provisioning:
+
+| Role | Description |
+|------|-------------|
+| **Standalone** (default) | Original behavior: one board does everything (OOK clone/replay, WiFi, HomeKit) |
+| **Gateway** | WiFi + LoRa. Controls up to 50 remote nodes. Exposes each remote's relays and RF buttons in HomeKit / Home Assistant |
+| **Remote** | LoRa only (no WiFi). Executes relay and RF replay commands from the gateway. 1-2 configurable GPIO relays |
+
+### Provisioning
+
+A WiFiManager captive portal appears on first boot (no config yet). You can also trigger it in two ways:
+
+| Method | When to use |
+|--------|-------------|
+| **Web UI** — click **"Reconfigure device"** on the home page (`http://<device-ip>/`) | Gateway or Standalone (has WiFi) |
+| **GPIO 2 jumper** — bridge GPIO 2 to GND at boot, hold 3+ seconds | Any role, including Remote (no WiFi) |
+
+The portal lets you configure:
+
+- **Role**: Standalone / Gateway / Remote
+- **Network ID** (1-254): must match across all devices in a deployment
+- **Node ID** (1-50): unique per remote
+- **PSK**: 32-character hex string for AES-128 encryption (shared secret)
+- **Relay GPIO pins**: per remote (0 = disabled, default: 12 and 13)
+- **Join policy** (gateway only): auto-join or manual-approve
+- **Heartbeat interval**: how often remotes report status (default: 120s)
+
+**Factory reset**: bridge GPIO 2 to GND at boot and hold for 10+ seconds. This clears all config and reboots into provisioning.
+
+> **Note:** The TTGO LoRa32 v2.1 only has a RST button. GPIO 2 is a free pin — use a jumper wire or a small momentary push-button soldered between GPIO 2 and GND.
+
+### Gateway setup
+
+1. Flash the firmware and complete provisioning as **Gateway**
+2. Configure WiFi (same portal)
+3. The gateway starts listening for LoRa join requests
+4. Open `http://<gateway-ip>/nodes` to see connected remotes, toggle relays, approve pending joins
+
+### Remote setup
+
+1. Flash the firmware and complete provisioning as **Remote**
+2. Set the same Network ID and PSK as your gateway
+3. The remote automatically joins the gateway and starts sending heartbeats
+4. No WiFi needed -- communicates entirely over LoRa
+
+### Protocol overview
+
+- **LoRa @ SF7 / BW125 / 433.92 MHz** -- short airtime, supports 50 nodes at ~5% duty cycle
+- **AES-128-CTR encryption** + **HMAC-SHA256** authentication on all packets
+- **Jittered ALOHA** anti-collision: remotes send heartbeats at random intervals (+-25% jitter)
+- **ACK/retry** with exponential backoff (1s, 2s, 4s), max 3 retries
+- **Sequence-based dedup** with per-node sliding window (16 entries)
+- **Round-robin command queue** on gateway for fair scheduling across nodes
+
+### HomeKit with gateway
+
+In gateway mode, HomeKit accessories are created for each joined remote's relays. After a new remote joins, reboot the gateway for the HomeKit bridge to pick up the new accessories (same pattern as standalone button name updates).
+
 ## Project layout
 
 - `platformio.ini` – PlatformIO env (board, libs)
-- `include/config.h` – Pins, WiFi, web auth, limits
-- `src/main.cpp` – WiFi, web server, API, HomeSpan setup
-- `src/storage.cpp/h` – LittleFS save/load of buttons
+- `include/config.h` – Pins, WiFi, web auth, limits, role/relay/LoRa defaults
+- `include/lora_config.h` – Protocol constants, message types, packet structs
+- `src/main.cpp` – Role dispatch, WiFi, web server, HomeSpan (standalone + gateway)
+- `src/storage.cpp/h` – LittleFS save/load of RF buttons
 - `src/rf_handler.cpp/h` – SX127x OOK, GPIO32 capture/replay
+- `src/device_config.cpp/h` – NVS-backed device configuration (role, network params)
+- `src/provisioning.cpp/h` – WiFiManager-based provisioning portal
+- `src/radio_manager.cpp/h` – SX127x mode switching (OOK / LoRa)
+- `src/lora_protocol.cpp/h` – Packet encode/decode, AES-128, HMAC, dedup
+- `src/lora_link.cpp/h` – LoRa TX/RX via RadioLib, async receive, TX queue
+- `src/gateway.cpp/h` – Node registry (50 entries), command queue, scheduler
+- `src/gateway_homekit.cpp/h` – HomeKit accessories for remote relay switches
+- `src/gateway_web.cpp/h` – Web UI and API for node management
+- `src/remote.cpp/h` – Remote main loop, command dispatch, join flow, heartbeats
+- `src/remote_relay.cpp/h` – GPIO relay control with NVS persistence
 
 ## License
 

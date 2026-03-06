@@ -15,6 +15,13 @@
 #include <HomeSpan.h>
 #include <ArduinoJson.h>
 
+#include "device_config.h"
+#include "provisioning.h"
+#include "gateway.h"
+#include "gateway_homekit.h"
+#include "gateway_web.h"
+#include "remote.h"
+
 static WebServer server(WEB_SERVER_PORT);
 static DNSServer dnsServer;
 static bool s_isAPMode = false;   // true = we are in hotspot, show WiFi config
@@ -33,6 +40,9 @@ static void buildDeviceId() {
   s_deviceId = String(suffix);
   s_deviceName = String("MemouRF32-") + s_deviceId;
 }
+
+// ---------- Active device role (resolved at boot) ----------
+static DeviceRole s_activeRole = ROLE_STANDALONE;
 
 // ---------- WiFi reconnect state ----------
 static bool s_homeSpanReady = false;
@@ -254,6 +264,7 @@ a{color:#0d6efd;} h1{color:#333;}
 <h1>MemouRF32</h1>
 <p><a href='/clone'>Clone RF</a> | <a href='/buttons'>Saved buttons</a> | <a href='/wifi'>WiFi settings</a></p>
 <p>Use <b>Clone RF</b> to capture a signal, then save it as a button.</p>
+<hr><p style='margin-top:1em;'><button onclick="if(confirm('This will clear the device config and reboot into the provisioning portal. Continue?')){fetch('/api/reconfigure',{method:'POST'}).then(()=>{document.body.innerHTML='<h2>Rebooting into provisioning...</h2><p>Connect to the MemouRF32-Setup hotspot to reconfigure.</p>'})}" style='background:#dc3545;color:#fff;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;'>Reconfigure device</button></p>
 </body></html>)rawhtml";
 
 static const char CLONE_PAGE[] PROGMEM = R"rawhtml(<!DOCTYPE html><html><head>
@@ -410,6 +421,15 @@ void handleButtonsPage() {
   server.send(200, "text/html", FPSTR(BUTTONS_PAGE));
 }
 
+void handleReconfigure() {
+  if (!requireAuth()) return;
+  server.send(200, "application/json", "{\"ok\":true,\"msg\":\"Rebooting into provisioning\"}");
+  delay(500);
+  deviceConfigClear();
+  delay(200);
+  ESP.restart();
+}
+
 // ---------- HomeKit: bridge with Switch services ----------
 
 struct RFSwitchService : Service::Switch {
@@ -484,16 +504,8 @@ void setupHomeSpan() {
   }
 }
 
-// ---------- setup / loop ----------
-void setup() {
-  Serial.begin(115200);
-  delay(500);
-
-  buildDeviceId();
-  Serial.print("MemouRF32 starting [");
-  Serial.print(s_deviceName);
-  Serial.println("]");
-
+// ---------- Standalone setup (original behavior, unchanged) ----------
+static void standaloneSetup() {
   if (!storageBegin()) Serial.println("Storage init failed");
   if (!rfBegin()) Serial.println("RF init failed (check SX127x)");
 
@@ -546,7 +558,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/wifi", handleWifiConfigPage);
   server.on("/api/wifi/save", HTTP_POST, handleWifiSave);
-  // Captive portal detection endpoints (Android, iOS, Windows, Firefox)
+  server.on("/api/reconfigure", HTTP_POST, handleReconfigure);
   server.on("/generate_204", handleCaptiveRedirect);
   server.on("/gen_204", handleCaptiveRedirect);
   server.on("/hotspot-detect.html", handleCaptiveRedirect);
@@ -563,7 +575,6 @@ void setup() {
   server.on("/api/buttons", HTTP_GET, handleButtonsList);
   server.on("/api/buttons", HTTP_POST, handleButtonSave);
   server.onNotFound([]() {
-    // In AP mode: redirect everything to config page (captive portal)
     if (s_isAPMode) {
       handleCaptiveRedirect();
       return;
@@ -604,11 +615,143 @@ void setup() {
   }
 }
 
-void loop() {
+// ---------- Gateway WiFi + web setup ----------
+static void gatewayWifiSetup(const DeviceConfig& devCfg) {
+  if (!storageBegin()) Serial.println("Storage init failed");
+
+  s_hasSavedCreds = wifiConfigLoad(s_savedSsid, s_savedPass) && s_savedSsid.length() > 0;
+  if (s_hasSavedCreds) {
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname(s_deviceName.c_str());
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(s_savedSsid.c_str(), s_savedPass.c_str());
+    unsigned long deadline = millis() + (unsigned long)WIFI_CONNECT_TIMEOUT_MS;
+    while (WiFi.status() != WL_CONNECTED && millis() < deadline) { delay(300); Serial.print("."); }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println();
+      Serial.print("WiFi OK: ");
+      Serial.println(WiFi.localIP());
+      s_isAPMode = false;
+    } else {
+      Serial.println(" STA timeout, starting AP+STA");
+      WiFi.mode(WIFI_AP_STA);
+      WiFi.setHostname(s_deviceName.c_str());
+      WiFi.setAutoReconnect(true);
+      WiFi.softAP(s_deviceName.c_str(), AP_PASSWORD, 1, 0, 4);
+      s_isAPMode = true;
+      delay(100);
+      dnsServer.start(53, "*", WiFi.softAPIP());
+      WiFi.begin(s_savedSsid.c_str(), s_savedPass.c_str());
+      s_lastReconnectAttempt = millis();
+    }
+  } else {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(s_deviceName.c_str(), AP_PASSWORD, 1, 0, 4);
+    s_isAPMode = true;
+    delay(100);
+    dnsServer.start(53, "*", WiFi.softAPIP());
+  }
+
+  // Register gateway-specific web routes (node management + existing clone/buttons)
+  server.on("/", handleRoot);
+  server.on("/wifi", handleWifiConfigPage);
+  server.on("/api/wifi/save", HTTP_POST, handleWifiSave);
+  server.on("/api/reconfigure", HTTP_POST, handleReconfigure);
+  server.on("/generate_204", handleCaptiveRedirect);
+  server.on("/gen_204", handleCaptiveRedirect);
+  server.on("/hotspot-detect.html", handleCaptiveRedirect);
+  server.on("/library/test/success.html", handleCaptiveRedirect);
+  server.on("/ncsi.txt", handleCaptiveRedirect);
+  server.on("/connecttest.txt", handleCaptiveRedirect);
+  server.on("/fwlink", handleCaptiveRedirect);
+  server.on("/clone", handleClonePage);
+  server.on("/buttons", handleButtonsPage);
+  server.on("/api/clone/start", HTTP_POST, handleCloneStart);
+  server.on("/api/clone/stop", HTTP_POST, handleCloneStop);
+  server.on("/api/clone/status", handleCloneStatus);
+  server.on("/api/clone/result", handleCloneResult);
+  server.on("/api/buttons", HTTP_GET, handleButtonsList);
+  server.on("/api/buttons", HTTP_POST, handleButtonSave);
+  // Gateway node APIs are registered by gatewayWebSetup (separate module)
+  server.onNotFound([]() {
+    if (s_isAPMode) { handleCaptiveRedirect(); return; }
+    String uri = server.uri();
+    if (uri.startsWith("/api/buttons/")) {
+      int start = 13;
+      int slash = uri.indexOf("/", start);
+      String id = (slash > 0) ? uri.substring(start, slash) : uri.substring(start);
+      String action = (slash > 0 && slash + 1 < (int)uri.length()) ? uri.substring(slash + 1) : "";
+      if (server.method() == HTTP_POST && action == "trigger") {
+        for (const auto& b : storageLoadButtons())
+          if (b.id == id) { rfReplayButton(b); server.send(200, "application/json", "{\"ok\":true}"); return; }
+        server.send(404, "application/json", "{\"ok\":false,\"error\":\"Not found\"}");
+        return;
+      }
+      if (server.method() == HTTP_DELETE && action.length() == 0) {
+        if (storageRemoveButton(id)) { server.send(200, "application/json", "{\"ok\":true}"); return; }
+        server.send(404, "application/json", "{\"ok\":false,\"error\":\"Not found\"}");
+        return;
+      }
+    }
+    server.send(404, "text/plain", "Not Found");
+  });
+
+  gatewayWebSetup(server);
+
+  server.begin();
+  Serial.print("Web server on port ");
+  Serial.println(WEB_SERVER_PORT);
+
+  gatewaySetup(devCfg);
+
+  if (!s_isAPMode) {
+    gatewayHomeKitSetup(devCfg, s_deviceName.c_str(), s_deviceId.c_str());
+    s_homeSpanReady = true;
+    Serial.println("Gateway HomeKit bridge ready.");
+  }
+}
+
+// ---------- setup / loop ----------
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  buildDeviceId();
+  Serial.print("MemouRF32 starting [");
+  Serial.print(s_deviceName);
+  Serial.println("]");
+
+  // Check if provisioning is needed (no config or PRG button held)
+  if (provisioningShouldRun()) {
+    provisioningRun(s_deviceName.c_str());
+    return; // provisioningRun reboots, but just in case
+  }
+
+  DeviceConfig devCfg = deviceConfigLoad();
+  s_activeRole = devCfg.provisioned ? devCfg.role : ROLE_STANDALONE;
+  Serial.printf("Role: %s\n",
+    s_activeRole == ROLE_GATEWAY ? "Gateway" :
+    s_activeRole == ROLE_REMOTE  ? "Remote"  : "Standalone");
+
+  switch (s_activeRole) {
+    case ROLE_STANDALONE:
+      standaloneSetup();
+      break;
+    case ROLE_GATEWAY:
+      gatewayWifiSetup(devCfg);
+      break;
+    case ROLE_REMOTE:
+      remoteSetup(devCfg);
+      break;
+  }
+}
+
+// ---------- Standalone loop (original behavior) ----------
+static void standaloneLoop() {
   if (s_homeSpanReady) homeSpan.poll();
   if (s_isAPMode) dnsServer.processNextRequest();
 
-  // Periodic WiFi retry when we have credentials but router isn't up yet
   if (s_hasSavedCreds && WiFi.status() != WL_CONNECTED) {
     unsigned long now = millis();
     if (now - s_lastReconnectAttempt >= WIFI_RECONNECT_INTERVAL_MS) {
@@ -618,7 +761,6 @@ void loop() {
     }
   }
 
-  // WiFi just came up after booting without it — shut down AP, start HomeKit
   if (s_hasSavedCreds && WiFi.status() == WL_CONNECTED && !s_homeSpanReady) {
     Serial.print("WiFi connected: ");
     Serial.println(WiFi.localIP());
@@ -641,4 +783,35 @@ void loop() {
   }
   server.handleClient();
   delay(1);
+}
+
+// ---------- Gateway loop ----------
+static void gatewayMainLoop() {
+  if (s_homeSpanReady) homeSpan.poll();
+  if (s_isAPMode) dnsServer.processNextRequest();
+
+  if (s_hasSavedCreds && WiFi.status() != WL_CONNECTED) {
+    unsigned long now = millis();
+    if (now - s_lastReconnectAttempt >= WIFI_RECONNECT_INTERVAL_MS) {
+      WiFi.begin(s_savedSsid.c_str(), s_savedPass.c_str());
+      s_lastReconnectAttempt = now;
+    }
+  }
+
+  gatewayLoop();
+
+  if (rfCaptureRunning()) {
+    if ((millis() - s_cloneStartMs >= CLONE_TIMEOUT_MS) || rfCaptureShouldAutoStop())
+      rfCaptureStop();
+  }
+  server.handleClient();
+  delay(1);
+}
+
+void loop() {
+  switch (s_activeRole) {
+    case ROLE_STANDALONE: standaloneLoop(); break;
+    case ROLE_GATEWAY:    gatewayMainLoop(); break;
+    case ROLE_REMOTE:     remoteLoop(); break;
+  }
 }
